@@ -8,6 +8,7 @@ interface Ingrediente {
   quantita: number;
   unita: string;
   descrizione?: string;
+  stato: "OK" | "POCO" | "ESAURITO";
   puoEliminare: boolean;
 }
 
@@ -19,42 +20,12 @@ const Ingredienti: React.FC = () => {
   const [unita, setUnita] = useState("");
   const [descrizione, setDescrizione] = useState("");
 
-  // 🔧 Carica TUTTI ingredienti + usato status (1 chiamata!)
+  // Il backend restituisce già stato delle scorte e puoEliminare
   useEffect(() => {
-    const caricaIngredienti = async () => {
-      try {
-        const [ingrRes, ricRes] = await Promise.all([
-          axios.get("/api/ingredienti"),
-          axios.get("/api/ricette"),
-        ]);
-
-        const tuttiIngredienti = Array.isArray(ingrRes.data)
-          ? ingrRes.data
-          : [];
-        const ricette = Array.isArray(ricRes.data) ? ricRes.data : [];
-
-        // Check usati da ingredienti_nomi
-        const usati = new Set<number>();
-        ricette.forEach((ricetta: any) => {
-          tuttiIngredienti.forEach((ing: any) => {
-            if (ricetta.ingredienti_nomi?.includes(ing.nome)) {
-              usati.add(ing.id);
-            }
-          });
-        });
-
-        // Aggiungi puoEliminare
-        const conCheck = tuttiIngredienti.map((ing: any) => ({
-          ...ing,
-          puoEliminare: !usati.has(ing.id),
-        }));
-
-        setIngredienti(conCheck);
-      } catch (err) {
-        console.error("❌ Caricamento ingredienti:", err);
-      }
-    };
-    caricaIngredienti();
+    axios
+      .get<Ingrediente[]>("/api/ingredienti")
+      .then((res) => setIngredienti(Array.isArray(res.data) ? res.data : []))
+      .catch((err) => console.error("Caricamento ingredienti:", err));
   }, []);
 
   const salvaIngrediente = () => {
@@ -92,7 +63,9 @@ const Ingredienti: React.FC = () => {
       axios
         .delete(`/api/ingredienti/${id}`)
         .then(() => window.location.reload())
-        .catch((err) => alert("Errore elimina: " + err.message));
+        .catch((err) =>
+          alert("Errore elimina: " + (err.response?.data?.errore || err.message)),
+        );
     }
   };
 
@@ -241,7 +214,7 @@ const Ingredienti: React.FC = () => {
             <p
               style={{ fontSize: "18px", margin: "5px 0", fontWeight: "bold" }}
             >
-              {ing.quantita} {ing.unita.toUpperCase()}
+              {ing.quantita} {ing.unita.toUpperCase()} · {ing.stato}
             </p>
             {ing.descrizione && (
               <p style={{ color: "#666", fontStyle: "italic" }}>
@@ -277,3 +250,6 @@ const Ingredienti: React.FC = () => {
 };
 
 export default Ingredienti;
+
+
+

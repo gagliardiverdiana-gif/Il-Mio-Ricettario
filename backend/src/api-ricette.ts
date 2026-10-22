@@ -1,165 +1,220 @@
 import { Router, Request, Response } from "express";
+import { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import pool from "./connessione-db";
-
-// Tipo per gli ingredienti ricevuti dal frontend
-interface IngredienteInput {
-  ingredienteId: string | number;
-  quantita: string | number;
-  unita: string;
-  nome?: string;
-}
-
-interface IngredienteNumerico {
-  ingredienteId: number;
-  quantita: number;
-  unita: string;
-  nome?: string;
-}
+import { HttpError, leggiId } from "./errori";
+import { convertiQuantita } from "./unita";
 
 const router = Router();
 
-// 1. GET tutte ricette (invariato ✅)
-router.get("/", async (req: Request, res: Response) => {
-  try {
-    const [ricette]: any[] = await pool.query(`
-      SELECT r.*, 
-        COALESCE(GROUP_CONCAT(CONCAT(i.nome, ' (', ri.quantita, ri.unita, ')') SEPARATOR ', '), 'Nessuno') as ingredienti_nomi
-      FROM ricette r 
-      LEFT JOIN ricetta_ingrediente ri ON r.id = ri.ricetta_id 
-      LEFT JOIN ingredienti i ON ri.ingrediente_id = i.id 
-      GROUP BY r.id
-    `);
-    console.log("📤 GET ricette:", ricette.length);
-    res.json(ricette || []); // ✅ Sempre array
-  } catch (error: any) {
-    console.error("GET errore:", error);
-    res.json([]); // ✅ Array vuoto su errore
+const DIFFICOLTA_AMMESSE = ["facile", "media", "difficile"];
+
+interface IngredienteRicetta {
+  ingredienteId: number;
+  quantita: number;
+  unita: string;
+}
+
+interface DatiRicetta {
+  nome: string;
+  istruzioni: string | null;
+  difficolta: string;
+}
+
+function validaDatiRicetta(body: unknown): DatiRicetta {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const nome = typeof b.nome === "string" ? b.nome.trim() : "";
+  const istruzioni =
+    typeof b.istruzioni === "string" && b.istruzioni.trim() !== ""
+      ? b.istruzioni.trim()
+      : null;
+  const difficolta = typeof b.difficolta === "string" ? b.difficolta : "facile";
+
+  if (nome === "" || nome.length > 255) {
+    throw new HttpError(400, "Il nome è obbligatorio (max 255 caratteri)");
   }
+  if (!DIFFICOLTA_AMMESSE.includes(difficolta)) {
+    throw new HttpError(400, `Difficoltà non valida. Ammesse: ${DIFFICOLTA_AMMESSE.join(", ")}`);
+  }
+  return { nome, istruzioni, difficolta };
+}
+
+function validaIngredienti(valore: unknown): IngredienteRicetta[] {
+  if (valore === undefined) return [];
+  if (!Array.isArray(valore)) {
+    throw new HttpError(400, "Il campo ingredienti deve essere un array");
+  }
+  const lista = valore.map((v: Record<string, unknown>) => {
+    const ingredienteId = Number(v?.ingredienteId);
+    const quantita = Number(v?.quantita);
+    const unita = typeof v?.unita === "string" ? v.unita.trim().toLowerCase() : "";
+    if (!Number.isInteger(ingredienteId) || ingredienteId <= 0) {
+      throw new HttpError(400, "ID ingrediente non valido");
+    }
+    if (!Number.isFinite(quantita) || quantita <= 0) {
+      throw new HttpError(400, `Quantità non valida per l'ingrediente ${ingredienteId}`);
+    }
+    if (unita === "") {
+      throw new HttpError(400, `Unità mancante per l'ingrediente ${ingredienteId}`);
+    }
+    return { ingredienteId, quantita, unita };
+  });
+  const ids = lista.map((i) => i.ingredienteId);
+  if (new Set(ids).size !== ids.length) {
+    throw new HttpError(400, "Lo stesso ingrediente compare più volte nella ricetta");
+  }
+  return lista;
+}
+
+/**
+ * Esegue una funzione dentro una transazione su una connessione dedicata.
+ * COMMIT se tutto va a buon fine, ROLLBACK su qualsiasi errore, e la
+ * connessione torna sempre al pool grazie al finally.
+ */
+async function inTransazione<T>(lavoro: (conn: PoolConnection) => Promise<T>): Promise<T> {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const risultato = await lavoro(conn);
+    await conn.commit();
+    return risultato;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+// Elenco ricette con riepilogo ingredienti
+router.get("/", async (_req: Request, res: Response) => {
+  const [ricette] = await pool.query<RowDataPacket[]>(`
+    SELECT r.*,
+      COALESCE(
+        GROUP_CONCAT(CONCAT(i.nome, ' (', ri.quantita, ' ', ri.unita, ')') SEPARATOR ', '),
+        'Nessuno'
+      ) AS ingredienti_nomi
+    FROM ricette r
+    LEFT JOIN ricetta_ingrediente ri ON r.id = ri.ricetta_id
+    LEFT JOIN ingredienti i ON ri.ingrediente_id = i.id
+    GROUP BY r.id
+    ORDER BY r.nome
+  `);
+  res.json(ricette);
 });
 
-// 2. POST CREATE + junction + stock ✅ FIXATO
+// Creazione: ricetta, collegamenti e scarico scorte in un'unica transazione
 router.post("/", async (req: Request, res: Response) => {
-  let conn: any = null;
-  try {
-    const { nome, istruzioni, difficolta, ingredienti } = req.body as {
-      nome: string;
-      istruzioni?: string;
-      difficolta?: string;
-      ingredienti?: IngredienteInput[];
-    };
+  const dati = validaDatiRicetta(req.body);
+  const ingredienti = validaIngredienti(req.body?.ingredienti);
 
-    // Converti ingredienti a tipo numerico
-    const ingredientiNumerici: IngredienteNumerico[] = (ingredienti || []).map(
-      (ing: IngredienteInput) => ({
-        ...ing,
-        ingredienteId: Number(ing.ingredienteId),
-        quantita: Number(ing.quantita),
-        unita: ing.unita || "",
-      }),
-    );
+  const ricettaId = await inTransazione(async (conn) => {
+    // 1. Blocca le righe degli ingredienti coinvolti (SELECT ... FOR UPDATE):
+    //    due richieste concorrenti non possono leggere la stessa scorta e
+    //    scalarla entrambe. Il controllo avviene prima di qualsiasi scrittura.
+    const scorte = new Map<number, { nome: string; quantita: number; unita: string }>();
+    if (ingredienti.length > 0) {
+      const ids = ingredienti.map((i) => i.ingredienteId);
+      const [righe] = await conn.query<RowDataPacket[]>(
+        "SELECT id, nome, quantita, unita FROM ingredienti WHERE id IN (?) ORDER BY id FOR UPDATE",
+        [ids],
+      );
+      for (const r of righe) {
+        scorte.set(r.id, { nome: r.nome, quantita: Number(r.quantita), unita: r.unita });
+      }
+    }
 
-    console.log("📥 POST ricevuto:", {
-      nome,
-      numIng: ingredientiNumerici.length,
-      esempio: ingredientiNumerici[0]
-        ? `${ingredientiNumerici[0].quantita}${ingredientiNumerici[0].unita}`
-        : "nessuno",
+    // 2. Verifica esistenza, compatibilità delle unità e disponibilità
+    const scarichi = ingredienti.map((ing) => {
+      const scorta = scorte.get(ing.ingredienteId);
+      if (!scorta) {
+        throw new HttpError(404, `L'ingrediente con ID ${ing.ingredienteId} non esiste`);
+      }
+      const daScalare = convertiQuantita(ing.quantita, ing.unita, scorta.unita);
+      if (daScalare > scorta.quantita) {
+        throw new HttpError(
+          409,
+          `Scorta insufficiente di "${scorta.nome}": servono ${daScalare} ${scorta.unita}, disponibili ${scorta.quantita} ${scorta.unita}`,
+        );
+      }
+      return { ...ing, daScalare };
     });
 
-    // Transazione
-    conn = await pool.getConnection();
-    await conn.beginTransaction();
-
-    // 1. Inserisci ricetta
-    const [ricettaRes] = (await conn.execute(
+    // 3. Scritture
+    const [ricetta] = await conn.execute<ResultSetHeader>(
       "INSERT INTO ricette (nome, istruzioni, difficolta) VALUES (?, ?, ?)",
-      [nome, istruzioni, difficolta || "facile"],
-    )) as any;
-    const ricettaId = ricettaRes.insertId;
-    console.log(`✅ Ricetta "${nome}" creata ID: ${ricettaId}`);
-
-    // 2. Junction + Scala stock (TUTTO IN TRANSAZIONE)
-    for (const ing of ingredientiNumerici) {
-      const { ingredienteId, quantita, unita } = ing;
-
-      if (isNaN(quantita) || quantita <= 0) {
-        throw new Error(
-          `Quantità non valida per ID ${ingredienteId}: ${quantita}`,
-        );
-      }
-
-      // Check stock (log, no throw)
-      const [stockCheck] = (await conn.execute(
-        "SELECT quantita FROM ingredienti WHERE id = ?", // ✅ quantita non giacenza
-        [ingredienteId],
-      )) as any[];
-      const giacenza = Number(stockCheck[0]?.quantita || 0);
-      console.log(
-        `📊 Stock ID${ingredienteId} ("${ing.nome || "N/D"}"): ${giacenza}g - ${quantita} = ${giacenza - quantita}`,
-      );
-
-      // Inserisci junction
-      await conn.execute(
-        "INSERT INTO ricetta_ingrediente (ricetta_id, ingrediente_id, quantita, unita) VALUES (?, ?, ?, ?)",
-        [ricettaId, ingredienteId, quantita, unita],
-      );
-
-      // Scala stock (GREATEST evita negativo)
-      const [stockUpdate] = (await conn.execute(
-        "UPDATE ingredienti SET quantita = GREATEST(0, quantita - ?) WHERE id = ?",
-        [quantita, ingredienteId],
-      )) as any;
-      console.log(
-        `✅ Scala ${quantita}${unita} da ID${ingredienteId}. Affected: ${stockUpdate.affectedRows}`,
-      );
-    }
-
-    await conn.commit();
-    res.status(201).json({ success: true, id: ricettaId });
-  } catch (error: any) {
-    if (conn) await conn.rollback();
-    console.error("❌ POST /ricette:", error.message);
-    res.status(500).json({ errore: error.message });
-  } finally {
-    if (conn) conn.release();
-  }
-});
-
-// 3. DELETE (invariato, funziona)
-router.delete("/:id", async (req: Request, res: Response) => {
-  let conn: any = null;
-  try {
-    conn = await pool.getConnection();
-    await conn.beginTransaction();
-
-    const [junctions]: any[] = await conn.query(
-      "SELECT ri.ingrediente_id, ri.quantita FROM ricetta_ingrediente ri WHERE ri.ricetta_id = ?",
-      [Number(req.params.id)],
+      [dati.nome, dati.istruzioni, dati.difficolta],
     );
 
-    // Ripristina stock (usa quantita)
-    if (junctions.length > 0) {
-      for (const j of junctions) {
-        await conn.execute(
-          "UPDATE ingredienti SET quantita = quantita + ? WHERE id = ?",
-          [j.quantita, j.ingrediente_id],
-        );
-      }
-      console.log(`📈 Stock ripristinato: ${junctions.length} ingredienti`);
+    for (const s of scarichi) {
+      await conn.execute(
+        "INSERT INTO ricetta_ingrediente (ricetta_id, ingrediente_id, quantita, unita) VALUES (?, ?, ?, ?)",
+        [ricetta.insertId, s.ingredienteId, s.quantita, s.unita],
+      );
+      await conn.execute("UPDATE ingredienti SET quantita = quantita - ? WHERE id = ?", [
+        s.daScalare,
+        s.ingredienteId,
+      ]);
     }
 
-    await conn.execute("DELETE FROM ricette WHERE id = ?", [req.params.id]);
-    await conn.commit();
+    return ricetta.insertId;
+  });
 
-    console.log("🗑️ Ricetta eliminata ID:", req.params.id);
-    res.json({ success: true });
-  } catch (error: any) {
-    if (conn) await conn.rollback();
-    console.error("DELETE errore:", error);
-    res.status(500).json({ errore: error.message });
-  } finally {
-    if (conn) conn.release();
+  res.status(201).json({ success: true, id: ricettaId });
+});
+
+// Modifica dei dati descrittivi (nome, istruzioni, difficoltà).
+// Gli ingredienti non si modificano qui: cambiarli richiederebbe di
+// ricalcolare le scorte, quindi si elimina e si ricrea la ricetta.
+router.put("/:id", async (req: Request, res: Response) => {
+  const id = leggiId(req.params.id);
+  const dati = validaDatiRicetta(req.body);
+  const [risultato] = await pool.execute<ResultSetHeader>(
+    "UPDATE ricette SET nome = ?, istruzioni = ?, difficolta = ? WHERE id = ?",
+    [dati.nome, dati.istruzioni, dati.difficolta, id],
+  );
+  if (risultato.affectedRows === 0) {
+    throw new HttpError(404, "Ricetta non trovata");
   }
+  res.json({ success: true });
+});
+
+// Eliminazione: ripristina esattamente le quantità scalate, poi elimina
+router.delete("/:id", async (req: Request, res: Response) => {
+  const id = leggiId(req.params.id);
+
+  await inTransazione(async (conn) => {
+    const [ricette] = await conn.query<RowDataPacket[]>(
+      "SELECT id FROM ricette WHERE id = ? FOR UPDATE",
+      [id],
+    );
+    if (ricette.length === 0) {
+      throw new HttpError(404, "Ricetta non trovata");
+    }
+
+    const [collegamenti] = await conn.query<RowDataPacket[]>(
+      `SELECT ri.ingrediente_id, ri.quantita, ri.unita, i.unita AS unita_scorta
+       FROM ricetta_ingrediente ri
+       JOIN ingredienti i ON i.id = ri.ingrediente_id
+       WHERE ri.ricetta_id = ?
+       ORDER BY ri.ingrediente_id
+       FOR UPDATE`,
+      [id],
+    );
+
+    for (const c of collegamenti) {
+      // Stessa conversione usata in creazione: il ripristino è simmetrico
+      const daRipristinare = convertiQuantita(Number(c.quantita), c.unita, c.unita_scorta);
+      await conn.execute("UPDATE ingredienti SET quantita = quantita + ? WHERE id = ?", [
+        daRipristinare,
+        c.ingrediente_id,
+      ]);
+    }
+
+    // I collegamenti vengono eliminati dalla foreign key ON DELETE CASCADE
+    await conn.execute("DELETE FROM ricette WHERE id = ?", [id]);
+  });
+
+  res.json({ success: true });
 });
 
 export default router;
