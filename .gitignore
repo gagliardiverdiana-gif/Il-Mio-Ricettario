@@ -1,0 +1,15 @@
+# Dipendenze
+node_modules/
+
+# Variabili d'ambiente (password e configurazioni locali)
+.env
+.env.local
+.env.*.local
+
+# Build
+build/
+dist/
+
+# Log e file di sistema
+*.log
+.DS_Store
