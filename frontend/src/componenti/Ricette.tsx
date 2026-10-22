@@ -130,7 +130,12 @@ const Ricette: React.FC = () => {
 
   const eliminaRicetta = (id: number) => {
     if (window.confirm("Elimina ricetta?")) {
-      axios.delete(`/api/ricette/${id}`).then(() => window.location.reload());
+      axios
+        .delete(`/api/ricette/${id}`)
+        .then(() => window.location.reload())
+        .catch((err) =>
+          alert("Errore: " + (err.response?.data?.errore || err.message)),
+        );
     }
   };
 
@@ -513,3 +518,6 @@ const Ricette: React.FC = () => {
 };
 
 export default Ricette;
+
+
+
