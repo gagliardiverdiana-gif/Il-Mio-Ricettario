@@ -1,6 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
-import Modal from "../componenti/Modal";
+import Modal from "./Modal";
+import { unitaCompatibili } from "../utils/unita";
+import { messaggioErrore } from "../utils/errori";
+
+type Difficolta = "facile" | "media" | "difficile";
 
 interface Ingrediente {
   id: number;
@@ -12,211 +16,191 @@ interface Ingrediente {
 interface Ricetta {
   id: number;
   nome: string;
-  istruzioni: string;
-  difficolta: "facile" | "media" | "difficile";
-  ingredienti_nomi?: string;
+  istruzioni: string | null;
+  difficolta: Difficolta;
+  ingredienti_nomi: string;
 }
 
+interface IngredienteSelezionato {
+  ingredienteId: number;
+  nome: string;
+  quantita: number;
+  unita: string;
+}
+
+const stileCampo: React.CSSProperties = {
+  width: "100%",
+  padding: "12px",
+  marginBottom: "15px",
+  fontSize: "16px",
+  borderRadius: "6px",
+  border: "1px solid #ddd",
+};
+
+const stileBottone = (colore: string): React.CSSProperties => ({
+  padding: "12px 24px",
+  background: colore,
+  color: "white",
+  border: "none",
+  borderRadius: "6px",
+  cursor: "pointer",
+});
+
 const Ricette: React.FC = () => {
-  const [ingredientiDisponibili, setIngredientiDisponibili] = useState<
-    Ingrediente[]
-  >([]);
   const [ricette, setRicette] = useState<Ricetta[]>([]);
-  const [mostraModaleRic, setMostraModaleRic] = useState(false);
+  const [ingredientiDisponibili, setIngredientiDisponibili] = useState<Ingrediente[]>([]);
+  const [caricamento, setCaricamento] = useState(true);
+  const [mostraModale, setMostraModale] = useState(false);
+  const [ricetteEspanse, setRicetteEspanse] = useState<Record<number, boolean>>({});
+
+  // Campi della ricetta: componenti controllati, i valori vivono nello stato
   const [nome, setNome] = useState("");
   const [istruzioni, setIstruzioni] = useState("");
-  const [difficolta, setDifficolta] = useState<
-    "facile" | "media" | "difficile" | ""
-  >("");
-  const [ingredientiSelezionati, setIngredientiSelezionati] = useState<
-    { ingredienteId: number; nome: string; quantita: number; unita: string }[]
-  >([]);
+  const [difficolta, setDifficolta] = useState<Difficolta | "">("");
+  const [selezionati, setSelezionati] = useState<IngredienteSelezionato[]>([]);
 
-  // 🆕 STATO PER TOGGLE ESPANSIONE RICETTE - FUORI DAL MAP!
-  const [ricetteEspanse, setRicetteEspanse] = useState<{
-    [key: number]: boolean;
-  }>({});
+  // Riga "aggiungi ingrediente": anche questi sono stato, non letture dal DOM
+  const [idScelto, setIdScelto] = useState("");
+  const [quantitaScelta, setQuantitaScelta] = useState("");
+  const [unitaScelta, setUnitaScelta] = useState("");
 
-  // 🔧 Carica dati con check array
-  useEffect(() => {
-    axios
-      .get("/api/ingredienti")
-      .then((res) => {
-        setIngredientiDisponibili(Array.isArray(res.data) ? res.data : []);
-      })
-      .catch(console.error);
+  const ingredienteScelto = ingredientiDisponibili.find((i) => i.id === Number(idScelto));
 
-    axios
-      .get("/api/ricette")
-      .then((res) => {
-        setRicette(Array.isArray(res.data) ? res.data : []);
-      })
-      .catch(console.error);
+  // Ricette e scorte insieme: creare o eliminare una ricetta cambia le scorte
+  const caricaDati = useCallback(async () => {
+    try {
+      const [resRicette, resIngredienti] = await Promise.all([
+        axios.get<Ricetta[]>("/api/ricette"),
+        axios.get<Ingrediente[]>("/api/ingredienti"),
+      ]);
+      setRicette(resRicette.data);
+      setIngredientiDisponibili(resIngredienti.data);
+    } catch (err) {
+      alert("Errore nel caricamento: " + messaggioErrore(err));
+    } finally {
+      setCaricamento(false);
+    }
   }, []);
 
-  const aggiungiIngredienteForm = () => {
-    const select = document.getElementById(
-      "ingredienteSelect",
-    ) as HTMLSelectElement;
-    const quantitaInput = document.getElementById(
-      "quantitaExtra",
-    ) as HTMLInputElement;
-    const unitaSelect = document.getElementById(
-      "unitaExtra",
-    ) as HTMLSelectElement;
+  useEffect(() => {
+    caricaDati();
+  }, [caricaDati]);
 
-    if (select?.value && quantitaInput?.value) {
-      const ingrediente = ingredientiDisponibili.find(
-        (ing) => ing.id === +select.value,
-      );
-      if (ingrediente) {
-        setIngredientiSelezionati([
-          ...ingredientiSelezionati,
-          {
-            ingredienteId: ingrediente.id,
-            nome: ingrediente.nome,
-            quantita: +quantitaInput.value,
-            unita: unitaSelect.value as string,
-          },
-        ]);
-        quantitaInput.value = "";
-        unitaSelect.value = "";
-        select.value = "";
-      }
-    }
+  const azzeraForm = () => {
+    setNome("");
+    setIstruzioni("");
+    setDifficolta("");
+    setSelezionati([]);
+    setIdScelto("");
+    setQuantitaScelta("");
+    setUnitaScelta("");
   };
 
-  const rimuoviIngredienteForm = (index: number) => {
-    setIngredientiSelezionati(
-      ingredientiSelezionati.filter((_, i) => i !== index),
-    );
+  const chiudiModale = () => {
+    setMostraModale(false);
+    azzeraForm();
   };
 
-  const salvaRicetta = () => {
-    if (
-      !nome ||
-      !istruzioni ||
-      !difficolta ||
-      ingredientiSelezionati.length === 0
-    ) {
-      alert("Compila tutti i campi obbligatori!");
+  // Scegliendo un ingrediente, l'unità parte da quella in cui è tenuta la scorta
+  const scegliIngrediente = (id: string) => {
+    setIdScelto(id);
+    const ing = ingredientiDisponibili.find((i) => i.id === Number(id));
+    setUnitaScelta(ing ? ing.unita : "");
+  };
+
+  const aggiungiIngrediente = () => {
+    const quantita = Number(quantitaScelta);
+    if (!ingredienteScelto || !unitaScelta || !(quantita > 0)) {
+      alert("Scegli un ingrediente, una quantità maggiore di 0 e l'unità");
       return;
     }
-    axios
-      .post("/api/ricette", {
+    setSelezionati((prec) => [
+      ...prec,
+      {
+        ingredienteId: ingredienteScelto.id,
+        nome: ingredienteScelto.nome,
+        quantita,
+        unita: unitaScelta,
+      },
+    ]);
+    setIdScelto("");
+    setQuantitaScelta("");
+    setUnitaScelta("");
+  };
+
+  const rimuoviIngrediente = (ingredienteId: number) =>
+    setSelezionati((prec) => prec.filter((s) => s.ingredienteId !== ingredienteId));
+
+  const salvaRicetta = async () => {
+    if (!nome.trim() || !istruzioni.trim() || !difficolta || selezionati.length === 0) {
+      alert("Nome, istruzioni, difficoltà e almeno un ingrediente sono obbligatori");
+      return;
+    }
+    try {
+      await axios.post("/api/ricette", {
         nome,
         istruzioni,
         difficolta,
-        ingredienti: ingredientiSelezionati.map((ing) => ({
-          ingredienteId: ing.ingredienteId,
-          quantita: ing.quantita,
-          unita: ing.unita,
+        ingredienti: selezionati.map(({ ingredienteId, quantita, unita }) => ({
+          ingredienteId,
+          quantita,
+          unita,
         })),
-      })
-      .then((res) => {
-        console.log("✅ Ricetta salvata:", res.data);
-        setMostraModaleRic(false);
-        setNome("");
-        setIstruzioni("");
-        setDifficolta("");
-        setIngredientiSelezionati([]);
-        window.location.reload(); // Refresh lista
-      })
-      .catch((err) => {
-        console.error("❌ Errore:", err.response?.data || err.message);
-        alert("Errore: " + (err.response?.data?.errore || "Controlla console"));
       });
-  };
-
-  const eliminaRicetta = (id: number) => {
-    if (window.confirm("Elimina ricetta?")) {
-      axios
-        .delete(`/api/ricette/${id}`)
-        .then(() => window.location.reload())
-        .catch((err) =>
-          alert("Errore: " + (err.response?.data?.errore || err.message)),
-        );
+      chiudiModale();
+      await caricaDati();
+    } catch (err) {
+      // Es. scorta insufficiente (409): il messaggio arriva dal backend
+      alert("Impossibile salvare: " + messaggioErrore(err));
     }
   };
 
-  // 🆕 FUNZIONE TOGGLE RICETTA (usa stato globale)
-  const toggleRicetta = (id: number) => {
-    setRicetteEspanse((prev) => ({
-      ...prev,
-      [id]: !prev[id],
-    }));
+  const eliminaRicetta = async (ricetta: Ricetta) => {
+    if (!window.confirm(`Eliminare "${ricetta.nome}"? Le scorte verranno ripristinate.`)) return;
+    try {
+      await axios.delete(`/api/ricette/${ricetta.id}`);
+      await caricaDati();
+    } catch (err) {
+      alert("Errore nell'eliminazione: " + messaggioErrore(err));
+    }
   };
+
+  const toggleRicetta = (id: number) =>
+    setRicetteEspanse((prec) => ({ ...prec, [id]: !prec[id] }));
+
+  // Nella tendina non compaiono gli ingredienti già aggiunti alla ricetta
+  const ingredientiSelezionabili = ingredientiDisponibili.filter(
+    (ing) => !selezionati.some((s) => s.ingredienteId === ing.id),
+  );
 
   return (
     <div>
       <h2>📋 Gestione Ricette</h2>
 
-      {/* 🔘 PULSANTE MODALE */}
       <button
-        onClick={() => setMostraModaleRic(true)}
-        style={{
-          padding: "15px 35px",
-          background: "#007bff",
-          color: "white",
-          border: "none",
-          borderRadius: "8px",
-          fontSize: "18px",
-          cursor: "pointer",
-          marginBottom: "30px",
-        }}
+        onClick={() => setMostraModale(true)}
+        style={{ ...stileBottone("#007bff"), padding: "15px 35px", fontSize: "18px", marginBottom: "30px" }}
       >
         📝 Nuova Ricetta
       </button>
 
-      {/* MODALE FORM RICETTA */}
-      <Modal
-        isOpen={mostraModaleRic}
-        onClose={() => setMostraModaleRic(false)}
-        title="📝 Crea Nuova Ricetta"
-      >
+      <Modal isOpen={mostraModale} onClose={chiudiModale} title="📝 Crea Nuova Ricetta">
         <input
           placeholder="Nome ricetta (obbligatorio)"
           value={nome}
           onChange={(e) => setNome(e.target.value)}
-          style={{
-            width: "100%",
-            padding: "12px",
-            marginBottom: "15px",
-            fontSize: "16px",
-            borderRadius: "6px",
-            border: "1px solid #ddd",
-          }}
+          style={stileCampo}
         />
         <textarea
-          placeholder="Istruzioni dettagliate (obbligatorio)"
+          placeholder="Istruzioni (obbligatorie)"
           value={istruzioni}
           onChange={(e) => setIstruzioni(e.target.value)}
-          style={{
-            width: "100%",
-            padding: "12px",
-            marginBottom: "15px",
-            fontSize: "16px",
-            borderRadius: "6px",
-            border: "1px solid #ddd",
-            minHeight: "120px",
-            resize: "vertical",
-          }}
+          style={{ ...stileCampo, minHeight: "120px", resize: "vertical" }}
         />
         <select
           value={difficolta}
-          onChange={(e) =>
-            setDifficolta(
-              e.target.value as "facile" | "media" | "difficile" | "",
-            )
-          }
-          style={{
-            width: "100%",
-            padding: "12px",
-            marginBottom: "20px",
-            fontSize: "16px",
-            borderRadius: "6px",
-            border: "1px solid #ddd",
-          }}
+          onChange={(e) => setDifficolta(e.target.value as Difficolta | "")}
+          style={{ ...stileCampo, marginBottom: "20px" }}
         >
           <option value="">Seleziona difficoltà</option>
           <option value="facile">🥚 Facile</option>
@@ -224,68 +208,54 @@ const Ricette: React.FC = () => {
           <option value="difficile">🔥 Difficile</option>
         </select>
 
-        {/* AGGIUNGI INGREDIENTI */}
         <h4 style={{ marginBottom: "10px" }}>Ingredienti:</h4>
-        <div
-          style={{
-            display: "flex",
-            gap: "10px",
-            marginBottom: "15px",
-            flexWrap: "wrap",
-          }}
-        >
+        <div style={{ display: "flex", gap: "10px", marginBottom: "15px", flexWrap: "wrap" }}>
           <select
-            id="ingredienteSelect"
+            value={idScelto}
+            onChange={(e) => scegliIngrediente(e.target.value)}
             style={{ padding: "10px", flex: 1, minWidth: "150px" }}
           >
             <option value="">Seleziona ingrediente</option>
-            {ingredientiDisponibili.map((ing) => (
+            {ingredientiSelezionabili.map((ing) => (
               <option key={ing.id} value={ing.id}>
-                {ing.nome}
+                {ing.nome} (disp. {ing.quantita} {ing.unita})
               </option>
             ))}
           </select>
           <input
-            id="quantitaExtra"
             type="number"
+            min="0"
+            step="any"
             placeholder="Q.tà"
+            value={quantitaScelta}
+            onChange={(e) => setQuantitaScelta(e.target.value)}
             style={{ padding: "10px", width: "80px" }}
           />
-          <select id="unitaExtra" style={{ padding: "10px", width: "100px" }}>
-            <option value="">Unità</option>
-            <option value="g">g</option>
-            <option value="ml">ml</option>
-            <option value="pz">pz</option>
-            <option value="kg">kg</option>
-            <option value="cl">cl</option>
-          </select>
-          <button
-            onClick={aggiungiIngredienteForm}
-            style={{
-              padding: "10px 15px",
-              background: "#007bff",
-              color: "white",
-              border: "none",
-              borderRadius: "6px",
-              cursor: "pointer",
-            }}
+          {/* Solo unità convertibili in quella della scorta: niente g per le uova */}
+          <select
+            value={unitaScelta}
+            onChange={(e) => setUnitaScelta(e.target.value)}
+            disabled={!ingredienteScelto}
+            style={{ padding: "10px", width: "110px" }}
           >
+            {!ingredienteScelto && <option value="">Unità</option>}
+            {ingredienteScelto &&
+              unitaCompatibili(ingredienteScelto.unita).map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
+          </select>
+          <button onClick={aggiungiIngrediente} style={{ ...stileBottone("#007bff"), padding: "10px 15px" }}>
             ➕
           </button>
         </div>
 
-        {/* LISTA SELEZIONATI */}
-        {ingredientiSelezionati.length > 0 ? (
-          <div
-            style={{
-              marginBottom: "20px",
-              maxHeight: "200px",
-              overflowY: "auto",
-            }}
-          >
-            {ingredientiSelezionati.map((ing, index) => (
+        {selezionati.length > 0 ? (
+          <div style={{ marginBottom: "20px", maxHeight: "200px", overflowY: "auto" }}>
+            {selezionati.map((ing) => (
               <div
-                key={index}
+                key={ing.ingredienteId}
                 style={{
                   display: "flex",
                   justifyContent: "space-between",
@@ -297,13 +267,10 @@ const Ricette: React.FC = () => {
                 }}
               >
                 <span>
-                  {ing.nome}:{" "}
-                  <strong>
-                    {ing.quantita} {ing.unita}
-                  </strong>
+                  {ing.nome}: <strong>{ing.quantita} {ing.unita}</strong>
                 </span>
                 <button
-                  onClick={() => rimuoviIngredienteForm(index)}
+                  onClick={() => rimuoviIngrediente(ing.ingredienteId)}
                   style={{
                     background: "#dc3545",
                     color: "white",
@@ -320,63 +287,32 @@ const Ricette: React.FC = () => {
             ))}
           </div>
         ) : (
-          <p
-            style={{
-              color: "#6c757d",
-              fontStyle: "italic",
-              marginBottom: "20px",
-            }}
-          >
-            Nessun ingrediente selezionato (obbligatorio!)
+          <p style={{ color: "#6c757d", fontStyle: "italic", marginBottom: "20px" }}>
+            Nessun ingrediente selezionato (almeno uno è obbligatorio)
           </p>
         )}
 
-        <div
-          style={{ display: "flex", gap: "10px", justifyContent: "flex-end" }}
-        >
-          <button
-            onClick={() => setMostraModaleRic(false)}
-            style={{
-              padding: "12px 24px",
-              background: "#6c757d",
-              color: "white",
-              border: "none",
-              borderRadius: "6px",
-              cursor: "pointer",
-            }}
-          >
+        <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end" }}>
+          <button onClick={chiudiModale} style={stileBottone("#6c757d")}>
             Annulla
           </button>
-          <button
-            onClick={salvaRicetta}
-            style={{
-              padding: "12px 24px",
-              background: "#28a745",
-              color: "white",
-              border: "none",
-              borderRadius: "6px",
-              cursor: "pointer",
-              fontSize: "16px",
-            }}
-          >
+          <button onClick={salvaRicetta} style={{ ...stileBottone("#28a745"), fontSize: "16px" }}>
             💾 Salva Ricetta
           </button>
         </div>
       </Modal>
 
-      {/* GRIGLIA RICETTE */}
       <h3>Ricette Salvate ({ricette.length})</h3>
-      {Array.isArray(ricette) && ricette.length > 0 ? (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(350px, 1fr))",
-            gap: "20px",
-          }}
-        >
+      {caricamento ? (
+        <p>Caricamento...</p>
+      ) : ricette.length === 0 ? (
+        <p style={{ textAlign: "center", color: "#6c757d", fontStyle: "italic", padding: "60px" }}>
+          Nessuna ricetta salvata. Crea la prima! 📝
+        </p>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(350px, 1fr))", gap: "20px" }}>
           {ricette.map((ricetta) => {
-            const mostraProcedimento = ricetteEspanse[ricetta.id] || false;
-
+            const espansa = ricetteEspanse[ricetta.id] ?? false;
             return (
               <div
                 key={ricetta.id}
@@ -388,11 +324,8 @@ const Ricette: React.FC = () => {
                   boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
                 }}
               >
-                {/* HEADER */}
                 <div style={{ padding: "25px", background: "#f8f9fa" }}>
-                  <h4 style={{ color: "#007bff", margin: "0 0 15px 0" }}>
-                    {ricetta.nome}
-                  </h4>
+                  <h4 style={{ color: "#007bff", margin: "0 0 15px 0" }}>{ricetta.nome}</h4>
                   <p style={{ margin: "0 0 10px 0" }}>
                     <strong>Difficoltà:</strong>
                     <span
@@ -408,29 +341,16 @@ const Ricette: React.FC = () => {
                       {ricetta.difficolta}
                     </span>
                   </p>
-                  <h5 style={{ margin: "15px 0 10px 0", color: "#28a745" }}>
-                    Ingredienti:
-                  </h5>
-                  <div
-                    style={{
-                      background: "#d4edda",
-                      padding: "12px",
-                      borderRadius: "8px",
-                      fontSize: "14px",
-                    }}
-                  >
-                    <strong>
-                      {ricetta.ingredienti_nomi || "Nessun ingrediente"}
-                    </strong>
+                  <h5 style={{ margin: "15px 0 10px 0", color: "#28a745" }}>Ingredienti:</h5>
+                  <div style={{ background: "#d4edda", padding: "12px", borderRadius: "8px", fontSize: "14px" }}>
+                    <strong>{ricetta.ingredienti_nomi}</strong>
                   </div>
-
-                  {/* 🔘 PULSANTE TOGGLE - FUNZIONA! */}
                   <button
                     onClick={() => toggleRicetta(ricetta.id)}
                     style={{
                       marginTop: "15px",
                       padding: "10px 20px",
-                      background: mostraProcedimento ? "#6c757d" : "#17a2b8",
+                      background: espansa ? "#6c757d" : "#17a2b8",
                       color: "white",
                       border: "none",
                       borderRadius: "25px",
@@ -440,26 +360,13 @@ const Ricette: React.FC = () => {
                       fontWeight: "bold",
                     }}
                   >
-                    📖{" "}
-                    {mostraProcedimento
-                      ? "Nascondi Procedimento"
-                      : "Mostra Procedimento"}
+                    📖 {espansa ? "Nascondi procedimento" : "Mostra procedimento"}
                   </button>
                 </div>
 
-                {/* PROCEDIMENTO ESPANDIBILE */}
-                {mostraProcedimento && (
-                  <div
-                    style={{
-                      background: "#f8f9fa",
-                      padding: "25px",
-                      borderTop: "1px solid #dee2e6",
-                      animation: "slideDown 0.3s ease-out",
-                    }}
-                  >
-                    <h5 style={{ marginTop: 0, color: "#495057" }}>
-                      Procedimento:
-                    </h5>
+                {espansa && (
+                  <div style={{ background: "#f8f9fa", padding: "25px", borderTop: "1px solid #dee2e6" }}>
+                    <h5 style={{ marginTop: 0, color: "#495057" }}>Procedimento:</h5>
                     <div
                       style={{
                         whiteSpace: "pre-wrap",
@@ -475,25 +382,8 @@ const Ricette: React.FC = () => {
                   </div>
                 )}
 
-                {/* ELIMINA */}
-                <div
-                  style={{
-                    padding: "15px 25px",
-                    background: "#f1f3f4",
-                    textAlign: "right",
-                  }}
-                >
-                  <button
-                    onClick={() => eliminaRicetta(ricetta.id)}
-                    style={{
-                      background: "#dc3545",
-                      color: "white",
-                      border: "none",
-                      padding: "10px 20px",
-                      borderRadius: "6px",
-                      cursor: "pointer",
-                    }}
-                  >
+                <div style={{ padding: "15px 25px", background: "#f1f3f4", textAlign: "right" }}>
+                  <button onClick={() => eliminaRicetta(ricetta)} style={{ ...stileBottone("#dc3545"), padding: "10px 20px" }}>
                     🗑️ Elimina
                   </button>
                 </div>
@@ -501,23 +391,9 @@ const Ricette: React.FC = () => {
             );
           })}
         </div>
-      ) : (
-        <p
-          style={{
-            textAlign: "center",
-            color: "#6c757d",
-            fontStyle: "italic",
-            padding: "60px",
-          }}
-        >
-          Nessuna ricetta salvata. Crea la prima! 📝
-        </p>
       )}
     </div>
   );
 };
 
 export default Ricette;
-
-
-

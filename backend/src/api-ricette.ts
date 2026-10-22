@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
-import { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import pool from "./connessione-db";
+import { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import pool, { inTransazione } from "./connessione-db";
 import { HttpError, leggiId } from "./errori";
 import { convertiQuantita } from "./unita";
 
@@ -16,21 +16,21 @@ interface IngredienteRicetta {
 
 interface DatiRicetta {
   nome: string;
-  istruzioni: string | null;
+  istruzioni: string;
   difficolta: string;
 }
 
 function validaDatiRicetta(body: unknown): DatiRicetta {
   const b = (body ?? {}) as Record<string, unknown>;
   const nome = typeof b.nome === "string" ? b.nome.trim() : "";
-  const istruzioni =
-    typeof b.istruzioni === "string" && b.istruzioni.trim() !== ""
-      ? b.istruzioni.trim()
-      : null;
+  const istruzioni = typeof b.istruzioni === "string" ? b.istruzioni.trim() : "";
   const difficolta = typeof b.difficolta === "string" ? b.difficolta : "facile";
 
   if (nome === "" || nome.length > 255) {
     throw new HttpError(400, "Il nome è obbligatorio (max 255 caratteri)");
+  }
+  if (istruzioni === "") {
+    throw new HttpError(400, "Le istruzioni sono obbligatorie");
   }
   if (!DIFFICOLTA_AMMESSE.includes(difficolta)) {
     throw new HttpError(400, `Difficoltà non valida. Ammesse: ${DIFFICOLTA_AMMESSE.join(", ")}`);
@@ -63,26 +63,6 @@ function validaIngredienti(valore: unknown): IngredienteRicetta[] {
     throw new HttpError(400, "Lo stesso ingrediente compare più volte nella ricetta");
   }
   return lista;
-}
-
-/**
- * Esegue una funzione dentro una transazione su una connessione dedicata.
- * COMMIT se tutto va a buon fine, ROLLBACK su qualsiasi errore, e la
- * connessione torna sempre al pool grazie al finally.
- */
-async function inTransazione<T>(lavoro: (conn: PoolConnection) => Promise<T>): Promise<T> {
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const risultato = await lavoro(conn);
-    await conn.commit();
-    return risultato;
-  } catch (err) {
-    await conn.rollback();
-    throw err;
-  } finally {
-    conn.release();
-  }
 }
 
 // Elenco ricette con riepilogo ingredienti

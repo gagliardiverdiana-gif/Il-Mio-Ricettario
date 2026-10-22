@@ -1,4 +1,4 @@
--- La Dispensa: struttura del database
+-- Il Mio Ricettario: struttura del database
 -- Uso: mysql -u TUO_UTENTE -p < database.sql
 --
 -- Nota: la colonna ingredienti.quantita rappresenta la scorta disponibile.
@@ -14,7 +14,7 @@ USE Ricettario_cucina;
 CREATE TABLE IF NOT EXISTS ricette (
   id          INT AUTO_INCREMENT PRIMARY KEY,
   nome        VARCHAR(255) NOT NULL,
-  istruzioni  TEXT,
+  istruzioni  TEXT NOT NULL,
   difficolta  VARCHAR(50) NOT NULL DEFAULT 'facile'
 );
 

@@ -30,3 +30,8 @@ export function convertiQuantita(quantita: number, da: string, a: string): numbe
   const convertita = (quantita * sorgente.fattore) / destinazione.fattore;
   return Math.round(convertita * 100) / 100;
 }
+
+/** Vero se le due unità sono convertibili tra loro (es. g e kg). */
+export function stessaFamiglia(a: string, b: string): boolean {
+  return FATTORI[a] !== undefined && FATTORI[a]?.famiglia === FATTORI[b]?.famiglia;
+}

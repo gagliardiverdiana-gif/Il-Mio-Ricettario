@@ -1,4 +1,4 @@
-import mysql from "mysql2/promise";
+import mysql, { PoolConnection } from "mysql2/promise";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -15,5 +15,25 @@ const pool = mysql.createPool({
   // DECIMAL restituiti come numeri invece che come stringhe
   decimalNumbers: true,
 });
+
+/**
+ * Esegue una funzione dentro una transazione su una connessione dedicata.
+ * COMMIT se tutto va a buon fine, ROLLBACK su qualsiasi errore, e la
+ * connessione torna sempre al pool grazie al finally.
+ */
+export async function inTransazione<T>(lavoro: (conn: PoolConnection) => Promise<T>): Promise<T> {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const risultato = await lavoro(conn);
+    await conn.commit();
+    return risultato;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
 
 export default pool;

@@ -22,11 +22,12 @@ Il cuore del progetto è la **coerenza dei dati**: quando si crea una ricetta, g
 
 ## ✨ Funzionalità
 
-- 🍝 **Ricette:** elenco con gli ingredienti usati, creazione con quantità e unità di misura, modifica di nome, istruzioni e difficoltà, eliminazione
-- 🥕 **Ingredienti:** elenco con scorta e stato (OK, POCO, ESAURITO), aggiunta, modifica ed eliminazione (bloccata se l'ingrediente è usato in una ricetta)
+- 🍝 **Ricette:** elenco con gli ingredienti usati, creazione con quantità e unità di misura, eliminazione con ripristino delle scorte
+- 🥕 **Ingredienti:** elenco con scorta e stato (OK, POCO, ESAURITO), aggiunta, modifica e rifornimento, eliminazione bloccata se l'ingrediente è usato in una ricetta
 - 📦 **Scorte automatiche:** la creazione di una ricetta scala le quantità, con conversione tra unità compatibili (es. kg → g), e viene rifiutata se la scorta non basta; l'eliminazione le ripristina esattamente
 - 🔒 **Transazioni con lock:** `SELECT ... FOR UPDATE`, controlli prima delle scritture, `COMMIT`/`ROLLBACK`
 - 🛡️ **API robuste:** validazione degli input e codici HTTP chiari (400, 404, 409)
+- 🧭 **Interfaccia guidata:** nel form della ricetta compaiono solo le unità compatibili con la scorta e non si può aggiungere due volte lo stesso ingrediente
 
 ## 🛠️ Tecnologie
 
@@ -45,7 +46,7 @@ Il-Mio-Ricettario/
 │   │   ├── server-principale.ts  # Avvio del server e rotte generali
 │   │   ├── api-ricette.ts        # Rotte delle ricette (transazioni)
 │   │   ├── api-ingredienti.ts    # Rotte degli ingredienti
-│   │   ├── connessione-db.ts     # Pool di connessioni MySQL
+│   │   ├── connessione-db.ts     # Pool di connessioni e helper delle transazioni
 │   │   ├── errori.ts             # Errori HTTP e middleware centrale
 │   │   └── unita.ts              # Conversione delle unità di misura
 │   ├── database.sql              # Creazione di database e tabelle
@@ -53,6 +54,7 @@ Il-Mio-Ricettario/
 └── frontend/
     └── src/
         ├── componenti/           # Home, Ricette, Ingredienti, Modal
+        ├── utils/                # Unità di misura e messaggi di errore
         └── styles/               # Fogli di stile
 ```
 
@@ -103,10 +105,10 @@ L'app si apre su `http://localhost:3000`.
 | GET | `/api/ingredienti` | Elenco con stato delle scorte e `puoEliminare` |
 | GET | `/api/ingredienti/:id` | Dettaglio |
 | POST | `/api/ingredienti` | Creazione (la quantità è la scorta iniziale) |
-| PUT | `/api/ingredienti/:id` | Modifica o rifornimento |
+| PUT | `/api/ingredienti/:id` | Modifica o rifornimento (409 se si cambia unità in modo incompatibile su un ingrediente in uso) |
 | DELETE | `/api/ingredienti/:id` | Eliminazione (409 se usato in una ricetta) |
 | GET | `/api/ricette` | Elenco con riepilogo ingredienti |
-| POST | `/api/ricette` | Creazione con scarico scorte in transazione |
+| POST | `/api/ricette` | Creazione con scarico scorte in transazione (nome, istruzioni e difficoltà obbligatori) |
 | PUT | `/api/ricette/:id` | Modifica di nome, istruzioni e difficoltà |
 | DELETE | `/api/ricette/:id` | Eliminazione con ripristino scorte in transazione |
 | GET | `/api/stats` | Conteggio ricette e ingredienti |

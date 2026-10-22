@@ -1,7 +1,8 @@
 import { Router, Request, Response } from "express";
 import { ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import pool from "./connessione-db";
+import pool, { inTransazione } from "./connessione-db";
 import { HttpError, leggiId } from "./errori";
+import { stessaFamiglia } from "./unita";
 
 const router = Router();
 
@@ -92,13 +93,31 @@ router.post("/", async (req: Request, res: Response) => {
 router.put("/:id", async (req: Request, res: Response) => {
   const id = leggiId(req.params.id);
   const { nome, quantita, unita, descrizione } = validaIngrediente(req.body);
-  const [risultato] = await pool.execute<ResultSetHeader>(
-    "UPDATE ingredienti SET nome = ?, quantita = ?, unita = ?, descrizione = ? WHERE id = ?",
-    [nome, quantita, unita, descrizione, id],
-  );
-  if (risultato.affectedRows === 0) {
-    throw new HttpError(404, "Ingrediente non trovato");
-  }
+
+  await inTransazione(async (conn) => {
+    const [righe] = await conn.query<RowDataPacket[]>(
+      `SELECT i.unita,
+         EXISTS (SELECT 1 FROM ricetta_ingrediente ri WHERE ri.ingrediente_id = i.id) AS usato
+       FROM ingredienti i WHERE i.id = ? FOR UPDATE`,
+      [id],
+    );
+    if (righe.length === 0) {
+      throw new HttpError(404, "Ingrediente non trovato");
+    }
+    // Le ricette salvate useranno l'unità della scorta per il ripristino:
+    // se l'ingrediente è in uso, si può passare solo a un'unità convertibile
+    if (Boolean(righe[0].usato) && !stessaFamiglia(righe[0].unita, unita)) {
+      throw new HttpError(
+        409,
+        `Ingrediente usato in una ricetta: l'unità "${righe[0].unita}" non può diventare "${unita}"`,
+      );
+    }
+    await conn.execute(
+      "UPDATE ingredienti SET nome = ?, quantita = ?, unita = ?, descrizione = ? WHERE id = ?",
+      [nome, quantita, unita, descrizione, id],
+    );
+  });
+
   res.json({ success: true });
 });
 
